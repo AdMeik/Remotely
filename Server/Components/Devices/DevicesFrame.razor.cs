@@ -27,16 +27,17 @@ namespace Remotely.Server.Components.Devices
     [Authorize]
     public partial class DevicesFrame : AuthComponentBase, IDisposable
     {
-        private readonly object _devicesLock = new();
         private readonly List<Device> _allDevices = new();
         private readonly string _deviceGroupAll = Guid.NewGuid().ToString();
         private readonly string _deviceGroupNone = Guid.NewGuid().ToString();
         private readonly List<DeviceGroup> _deviceGroups = new();
+        private readonly List<Device> _devicesForPage = new();
+        private readonly object _devicesLock = new();
         private readonly List<Device> _filteredDevices = new();
         private readonly ConcurrentDictionary<string, RemoteControlTarget> _remoteControlTargetLookup = new();
         private readonly List<PropertyInfo> _sortableProperties = new();
         private int _currentPage = 1;
-        private int _devicesPerPage = 50;
+        private int _devicesPerPage = 25;
         private string _filter;
         private bool _hideOfflineDevices = true;
         private string _selectedGroupId;
@@ -53,22 +54,6 @@ namespace Remotely.Server.Components.Devices
 
         [Inject]
         private IDataService DataService { get; set; }
-
-        private IEnumerable<Device> DevicesForPage
-        {
-            get
-            {
-                var appendDevices = _filteredDevices.Where(x => AppState.DevicesFrameSelectedDevices.Contains(x.ID));
-                var skipCount = (_currentPage - 1) * _devicesPerPage;
-                var devicesForPage = _filteredDevices
-                    .Except(appendDevices)
-                    .Skip(skipCount)
-                    .Take(_devicesPerPage);
-
-
-                return appendDevices.Concat(devicesForPage);
-            }
-        }
 
         [Inject]
         private IJsInterop JsInterop { get; set; }
@@ -156,12 +141,6 @@ namespace Remotely.Server.Components.Devices
         {
             switch (args.EventName)
             {
-                case CircuitEventName.DeviceUpdate:
-                case CircuitEventName.DeviceWentOffline:
-                    {
-                        Refresh();
-                    }
-                    break;
                 case CircuitEventName.DisplayMessage:
                     {
                         var terminalMessage = (string)args.Params[0];
@@ -205,60 +184,12 @@ namespace Remotely.Server.Components.Devices
             AppState.DevicesFrameFocusedCardState = DeviceCardState.Normal;
         }
 
-        private string GetDisplayName(PropertyInfo propInfo)
-        {
-            return propInfo.GetCustomAttribute<DisplayAttribute>()?.Name ?? propInfo.Name;
-        }
-
-        private string GetSortIcon()
-        {
-            return $"oi-sort-{_sortDirection.ToString().ToLower()}";
-        }
-
-        private void LoadDevices()
-        {
-            lock (_devicesLock)
-            {
-                _allDevices.Clear();
-
-                var devices = DataService.GetDevicesForUser(Username)
-                    .OrderByDescending(x => x.IsOnline)
-                    .ToList();
-
-                _allDevices.AddRange(devices);
-
-                HighestVersion = _allDevices.Max(x => Version.TryParse(x.AgentVersion, out var result) ? result : default);
-            }
-
-            FilterDevices();
-        }
-
         private void FilterDevices()
         {
             lock (_devicesLock)
             {
                 _filteredDevices.Clear();
                 _filteredDevices.AddRange(_allDevices);
-
-                if (!string.IsNullOrWhiteSpace(_selectedSortProperty))
-                {
-                    var direction = _sortDirection == ListSortDirection.Ascending ? 1 : -1;
-                    _filteredDevices.Sort((a, b) =>
-                    {
-                        if (a.IsOnline != b.IsOnline)
-                        {
-                            return b.IsOnline.CompareTo(a.IsOnline);
-                        }
-
-                        var propInfo = _sortableProperties.Find(x => x.Name == _selectedSortProperty);
-
-                        var valueA = propInfo.GetValue(a);
-                        var valueB = propInfo.GetValue(b);
-
-                        return Comparer.Default.Compare(valueA, valueB) * direction;
-                    });
-                }
-
 
                 if (_hideOfflineDevices)
                 {
@@ -284,9 +215,72 @@ namespace Remotely.Server.Components.Devices
                         x.Platform?.Contains(_filter, StringComparison.OrdinalIgnoreCase) != true &&
                         x.Tags?.Contains(_filter, StringComparison.OrdinalIgnoreCase) != true);
                 }
+
+                if (!string.IsNullOrWhiteSpace(_selectedSortProperty))
+                {
+                    var direction = _sortDirection == ListSortDirection.Ascending ? 1 : -1;
+                    _filteredDevices.Sort((a, b) =>
+                    {
+                        if (a.IsOnline != b.IsOnline)
+                        {
+                            return b.IsOnline.CompareTo(a.IsOnline);
+                        }
+
+                        var propInfo = _sortableProperties.Find(x => x.Name == _selectedSortProperty);
+
+                        var valueA = propInfo.GetValue(a);
+                        var valueB = propInfo.GetValue(b);
+
+                        return Comparer.Default.Compare(valueA, valueB) * direction;
+                    });
+                }
+
+                var appendDevices = _filteredDevices.Where(x => AppState.DevicesFrameSelectedDevices.Contains(x.ID));
+                var skipCount = (_currentPage - 1) * _devicesPerPage;
+                var devicesForPage = _filteredDevices
+                    .Except(appendDevices)
+                    .Skip(skipCount)
+                    .Take(_devicesPerPage);
+
+                _devicesForPage.Clear();
+                _devicesForPage.AddRange(appendDevices.Concat(devicesForPage));
             }
+
         }
 
+        private string GetDisplayName(PropertyInfo propInfo)
+        {
+            return propInfo.GetCustomAttribute<DisplayAttribute>()?.Name ?? propInfo.Name;
+        }
+
+        private string GetSortIcon()
+        {
+            return $"oi-sort-{_sortDirection.ToString().ToLower()}";
+        }
+
+        private void HandleRefreshClicked()
+        {
+            Refresh();
+            ToastService.ShowToast("Devices refreshed.");
+        }
+
+        private void LoadDevices()
+        {
+            lock (_devicesLock)
+            {
+                _allDevices.Clear();
+
+                var devices = DataService.GetDevicesForUser(Username)
+                    .OrderByDescending(x => x.IsOnline)
+                    .ToList();
+
+                _allDevices.AddRange(devices);
+
+                HighestVersion = _allDevices.Max(x => Version.TryParse(x.AgentVersion, out var result) ? result : default);
+            }
+
+            FilterDevices();
+        }
         private void PageDown()
         {
             if (_currentPage > 1)
